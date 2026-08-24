@@ -1,0 +1,13 @@
+.gradle/
+build/
+.idea/
+*.iml
+out/
+.kotlin/
+.DS_Store
+
+# secrets - never commit real API keys
+secrets.properties
+
+# batch fetch output (landing files before DB load)
+output/

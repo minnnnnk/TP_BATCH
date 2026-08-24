@@ -1,0 +1,7 @@
+spring:
+  application:
+    name: tp-batch
+
+tour:
+  batch:
+    area-max-pages: 20
