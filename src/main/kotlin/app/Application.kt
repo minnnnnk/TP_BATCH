@@ -3,7 +3,7 @@ package app
 import org.springframework.boot.autoconfigure.SpringBootApplication
 import org.springframework.boot.runApplication
 
-@SpringBootApplication(scanBasePackages = ["app", "batch", "db", "tourapi"])
+@SpringBootApplication(scanBasePackages = ["app", "batch", "db", "tourapi", "kma"])
 class Application
 
 fun main(args: Array<String>) {
