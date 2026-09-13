@@ -20,9 +20,28 @@ data class KmaForecastZoneDto(
 
 @Serializable
 data class KmaWarningZoneDto(
+    val warningAreaCode: String? = null,
     val wrnZoneCd: String? = null,
     val wrnZoneName: String? = null,
-)
+    val areaCode: String? = null,
+    val areaName: String? = null,
+    val korName: String? = null,
+    val engName: String? = null,
+    val regId: String? = null,
+    val regName: String? = null,
+) {
+    val resolvedZoneCd: String?
+        get() = warningAreaCode?.takeIf { it.isNotBlank() }
+            ?: wrnZoneCd?.takeIf { it.isNotBlank() }
+            ?: areaCode?.takeIf { it.isNotBlank() }
+            ?: regId?.takeIf { it.isNotBlank() }
+
+    val resolvedZoneName: String?
+        get() = korName?.takeIf { it.isNotBlank() }
+            ?: wrnZoneName?.takeIf { it.isNotBlank() }
+            ?: areaName?.takeIf { it.isNotBlank() }
+            ?: regName?.takeIf { it.isNotBlank() }
+}
 
 @Serializable
 data class KmaVilageFcstItemDto(

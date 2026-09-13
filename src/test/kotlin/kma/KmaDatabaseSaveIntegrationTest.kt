@@ -13,7 +13,7 @@ class KmaDatabaseSaveIntegrationTest {
 
     @Test
     fun `test full pipeline - save regions, collect forecasts and save to DB`() {
-        // 1. 전국 행정동 마스터 기본 데이터 DB 저장
+        // 1. 전국 행정동 마스터 기본 데이터 DB 저장 (forecast_zone에 존재하는 regId 연동)
         val initialRegions = SampleRegions.NATIONWIDE_REGIONS
         KmaRepository.saveRegions(initialRegions)
 
@@ -22,13 +22,12 @@ class KmaDatabaseSaveIntegrationTest {
         assertTrue(activeRegions.isNotEmpty(), "Active regions must not be empty")
         println("📍 DB에서 조회된 활성 행정동: ${activeRegions.size}건")
 
-        // 3. 기상청 예보 수집 (서울 및 부산 등 2개 지역으로 테스트 수집)
-        val testRegions = activeRegions.take(2)
+        // 3. 기상청 단기 및 중기 실시간 예보 수집
         val collector = KmaForecastCollector()
-        val result = collector.collectAll(testRegions, intervalHours = 4)
+        val result = collector.collectAll(activeRegions, intervalHours = 4)
 
-        println("📊 수집된 단기예보: ${result.shortTermForecasts.size}건")
-        println("📊 수집된 중기예보: ${result.midTermForecasts.size}건")
+        println("📊 수집된 단기예보 레코드: ${result.shortTermForecasts.size}건")
+        println("📊 수집된 중기예보 레코드: ${result.midTermForecasts.size}건")
 
         // 4. DB에 단기 및 중기예보 Bulk Upsert 저장
         if (result.shortTermForecasts.isNotEmpty()) {
@@ -42,8 +41,9 @@ class KmaDatabaseSaveIntegrationTest {
         transaction(DbConfig.database) {
             val shortTermCount = ShortTermForecastTable.selectAll().count()
             val midTermCount = MidTermForecastTable.selectAll().count()
-            println("🎉 DB 확인 완료 - short_term_forecast 건수: $shortTermCount, mid_term_forecast 건수: $midTermCount")
-            assertTrue(shortTermCount > 0 || midTermCount > 0, "Forecast records should be saved in DB")
+            println("🎉 DB 최종 적재 확인 - short_term_forecast 건수: $shortTermCount, mid_term_forecast 건수: $midTermCount")
+            assertTrue(shortTermCount > 0, "Short-term forecast records should be saved in DB")
+            assertTrue(midTermCount > 0, "Mid-term forecast records should be saved in DB")
         }
     }
 }

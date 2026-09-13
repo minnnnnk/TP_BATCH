@@ -188,6 +188,51 @@ class KmaApiTest {
     }
 
     @Test
+    @DisplayName("3-1. [구역코드 페이징] pageNo를 1씩 증가시키며 데이터가 없을 때 정상 종료되는지 테스트")
+    fun testForecastZonePaginationTermination() {
+        val requestedPages = mutableListOf<Int>()
+
+        val mockService = object : KmaApiService() {
+            override fun fetchForecastZones(regId: String?, numOfRows: Int, pageNo: Int): List<ForecastZoneRecord> {
+                requestedPages.add(pageNo)
+                return when (pageNo) {
+                    1 -> listOf(ForecastZoneRecord(regId = "11B10101", regName = "서울", providerCode = "KMA"))
+                    2 -> listOf(ForecastZoneRecord(regId = "11H20201", regName = "부산", providerCode = "KMA"))
+                    3 -> listOf(ForecastZoneRecord(regId = "11G00201", regName = "제주", providerCode = "KMA"))
+                    else -> emptyList() // 데이터 없음 -> 종료
+                }
+            }
+        }
+
+        val allZones = mockService.fetchAllForecastZones(pageSize = 100)
+
+        assertEquals(3, allZones.size)
+        assertEquals(listOf(1, 2, 3, 4), requestedPages, "1, 2, 3페이지 조회 후 4페이지에서 빈 목록을 수신하여 종료되어야 합니다.")
+    }
+
+    @Test
+    @DisplayName("3-2. [특보구역 페이징] pageNo를 1씩 증가시키며 데이터가 없을 때 정상 종료되는지 테스트")
+    fun testWarningZonePaginationTermination() {
+        val requestedPages = mutableListOf<Int>()
+
+        val mockService = object : KmaApiService() {
+            override fun fetchWarningZones(korName: String?, numOfRows: Int, pageNo: Int): List<WarningZoneRecord> {
+                requestedPages.add(pageNo)
+                return when (pageNo) {
+                    1 -> listOf(WarningZoneRecord(wrnZoneCd = "L1020100", wrnZoneName = "서울동북권", providerCode = "KMA"))
+                    2 -> listOf(WarningZoneRecord(wrnZoneCd = "L1020200", wrnZoneName = "서울서북권", providerCode = "KMA"))
+                    else -> emptyList() // 데이터 없음 -> 종료
+                }
+            }
+        }
+
+        val allZones = mockService.fetchAllWarningZones(pageSize = 100)
+
+        assertEquals(2, allZones.size)
+        assertEquals(listOf(1, 2, 3), requestedPages, "1, 2페이지 조회 후 3페이지에서 빈 목록을 수신하여 종료되어야 합니다.")
+    }
+
+    @Test
     @DisplayName("4-1. [Live API] 예보구역 목록 조회 (getFcstZoneCd)")
     fun testLiveForecastZoneApi() {
         val apiKey = KmaConfig.apiKey
@@ -206,7 +251,7 @@ class KmaApiTest {
     }
 
     @Test
-    @DisplayName("4-2. [Live API] 특보구역 목록 조회 (WthrWrnInfoService)")
+    @DisplayName("4-2. [Live API] 특보구역 목록 조회 (WethrBasicInfoService/getWrnZoneCd)")
     fun testLiveWarningZoneApi() {
         val apiKey = KmaConfig.apiKey
         if (apiKey.isBlank()) {
@@ -223,7 +268,7 @@ class KmaApiTest {
             }
             assertTrue(zones.isNotEmpty(), "특보구역 목록이 1건 이상 반환되어야 합니다.")
         } catch (e: Exception) {
-            println("ℹ️ 특보구역 API 호출 결과 (API 허브 계정별 권한 확인 필요): ${e.message}")
+            println("ℹ️ 특보구역 API 호출 결과: ${e.message}")
         }
     }
 
@@ -324,7 +369,7 @@ class KmaApiTest {
     @DisplayName("7. [예보구역정보] getFcstZoneCd API를 통해 북한을 제외한 대한민국 전역 예보구역 일괄 수집 및 DB 적재")
     fun testFetchAndSaveAllSouthKoreaForecastZones() {
         println("🚀 [Live API] 북한 제외 대한민국 전역 예보구역(getFcstZoneCd) 일괄 수집 시작...")
-        val zones = apiService.fetchAllSouthKoreaForecastZones(pageSize = 1000)
+        val zones = apiService.fetchAllSouthKoreaForecastZones(pageSize = 100)
 
         println("✅ 수집된 대한민국 예보구역 수: ${zones.size}개")
         assertTrue(zones.isNotEmpty(), "예보구역이 1개 이상 수집되어야 합니다.")
@@ -339,5 +384,47 @@ class KmaApiTest {
         // DB에 Bulk Upsert 저장
         db.KmaRepository.saveForecastZones(zones)
         println("🎉 DB(forecast_zone 테이블)에 ${zones.size}건 적재 완료!")
+    }
+
+    @Test
+    @DisplayName("8. [특보구역정보] getWrnZoneCd API를 통해 전국 특보구역 일괄 수집 및 DB 적재")
+    fun testFetchAndSaveAllWarningZones() {
+        val apiKey = KmaConfig.apiKey
+        if (apiKey.isBlank()) {
+            println("ℹ️ 기상청 API 인증키가 없어 테스트를 건너뜁니다.")
+            return
+        }
+
+        println("🚀 [Live API] 전국 특보구역(getWrnZoneCd) 일괄 수집 시작...")
+        val zones = apiService.fetchAllWarningZones(pageSize = 100)
+
+        println("✅ 수집된 특보구역 수: ${zones.size}개")
+        assertTrue(zones.isNotEmpty(), "특보구역이 1개 이상 수집되어야 합니다.")
+
+        // DB에 Bulk Upsert 저장
+        db.KmaRepository.saveWarningZones(zones)
+        println("🎉 DB(warning_zone 테이블)에 ${zones.size}건 적재 완료!")
+    }
+
+    @Test
+    @DisplayName("9. [초기 마스터 구축] 예보구역(getFcstZoneCd) 및 특보구역(getWrnZoneCd) 전체 일괄 수집 및 DB 적재")
+    fun testFetchAndSaveAllMasterZones() {
+        val apiKey = KmaConfig.apiKey
+        if (apiKey.isBlank()) {
+            println("ℹ️ 기상청 API 인증키가 없어 테스트를 건너뜁니다.")
+            return
+        }
+
+        println("🚀 [초기 마스터 구축] 1단계: 예보구역(getFcstZoneCd) 일괄 수집 시작...")
+        val fcstZones = apiService.fetchAllSouthKoreaForecastZones(pageSize = 100)
+        db.KmaRepository.saveForecastZones(fcstZones)
+        println("✅ [1단계 완료] forecast_zone: ${fcstZones.size}건 저장 완료")
+
+        println("🚀 [초기 마스터 구축] 2단계: 특보구역(getWrnZoneCd) 일괄 수집 시작...")
+        val wrnZones = apiService.fetchAllWarningZones(pageSize = 100)
+        db.KmaRepository.saveWarningZones(wrnZones)
+        println("✅ [2단계 완료] warning_zone: ${wrnZones.size}건 저장 완료")
+
+        println("🎉 [초기 마스터 구축 완료] 예보구역 ${fcstZones.size}건 / 특보구역 ${wrnZones.size}건 DB 적재 완료!")
     }
 }

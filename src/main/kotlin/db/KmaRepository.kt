@@ -4,6 +4,7 @@ import kma.ForecastZoneRecord
 import kma.MidTermForecastRecord
 import kma.RegionLocationRecord
 import kma.ShortTermForecastRecord
+import kma.WarningZoneRecord
 import org.jetbrains.exposed.v1.core.eq
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
@@ -36,10 +37,31 @@ object KmaRepository {
     }
 
     /**
+     * weather_provider 마스터 기본 레코드 초기화 (KMA)
+     */
+    fun initProvider() {
+        val sql = """
+            INSERT INTO weather_provider (provider_code, provider_name, api_base_url, is_active)
+            VALUES ('KMA', '기상청 API 허브', 'https://apihub.kma.go.kr', TRUE)
+            ON CONFLICT (provider_code) DO NOTHING
+        """.trimIndent()
+        try {
+            DbConfig.dataSource.connection.use { conn ->
+                conn.createStatement().use { stmt ->
+                    stmt.execute(sql)
+                }
+            }
+        } catch (e: Exception) {
+            log.warn("weather_provider 초기화 확인 중 예외 (이미 존재하거나 무시 가능): {}", e.message)
+        }
+    }
+
+    /**
      * 예보구역 마스터 목록 저장 (Bulk Upsert)
      */
     fun saveForecastZones(zones: List<ForecastZoneRecord>) {
         if (zones.isEmpty()) return
+        initProvider()
 
         val sql = """
             INSERT INTO forecast_zone (
@@ -81,6 +103,45 @@ object KmaRepository {
             } catch (e: Exception) {
                 conn.rollback()
                 log.error("❌ 예보구역 마스터 저장 실패", e)
+                throw e
+            }
+        }
+    }
+
+    /**
+     * 특보구역 마스터 목록 저장 (Bulk Upsert)
+     */
+    fun saveWarningZones(zones: List<WarningZoneRecord>) {
+        if (zones.isEmpty()) return
+        initProvider()
+
+        val sql = """
+            INSERT INTO warning_zone (
+                wrn_zone_cd, provider_code, wrn_zone_name, created_at, updated_at
+            ) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (wrn_zone_cd) DO UPDATE SET
+                provider_code = EXCLUDED.provider_code,
+                wrn_zone_name = EXCLUDED.wrn_zone_name,
+                updated_at = CURRENT_TIMESTAMP
+        """.trimIndent()
+
+        DbConfig.dataSource.connection.use { conn ->
+            conn.autoCommit = false
+            try {
+                conn.prepareStatement(sql).use { ps ->
+                    for (z in zones) {
+                        ps.setString(1, z.wrnZoneCd)
+                        ps.setString(2, z.providerCode)
+                        ps.setString(3, z.wrnZoneName)
+                        ps.addBatch()
+                    }
+                    ps.executeBatch()
+                }
+                conn.commit()
+                log.info("✅ 특보구역 마스터 {}건 저장/갱신 완료", zones.size)
+            } catch (e: Exception) {
+                conn.rollback()
+                log.error("❌ 특보구역 마스터 저장 실패", e)
                 throw e
             }
         }

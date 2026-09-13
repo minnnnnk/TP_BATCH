@@ -49,6 +49,8 @@ class KmaApiClient(
         val cleanPath = if (path.startsWith("/")) path else "/$path"
 
         val queryParams = linkedMapOf<String, String>()
+        queryParams.putAll(params)
+        queryParams["dataType"] = "JSON"
         if (apiKey.isNotBlank()) {
             if (cleanBaseUrl.contains("apihub.kma.go.kr")) {
                 queryParams["authKey"] = apiKey
@@ -56,8 +58,6 @@ class KmaApiClient(
                 queryParams["serviceKey"] = apiKey
             }
         }
-        queryParams["dataType"] = "JSON"
-        queryParams.putAll(params)
 
         val queryString = queryParams.entries.joinToString("&") { (k, v) ->
             "$k=${URLEncoder.encode(v, StandardCharsets.UTF_8)}"
@@ -86,7 +86,8 @@ class KmaApiClient(
         val resultCode = header?.get("resultCode")?.toString()?.trim('"')
         val resultMsg = header?.get("resultMsg")?.toString()?.trim('"') ?: "unknown"
 
-        if (resultCode != null && resultCode != "00" && resultCode != "0000") {
+        // 00: 정상, 0000: 정상, 03: 데이터 없음(NO_DATA) -> 정상 처리하여 빈 목록 반환 유도
+        if (resultCode != null && resultCode != "00" && resultCode != "0000" && resultCode != "03") {
             throw KmaApiException(resultCode, resultMsg)
         }
         return root
@@ -97,12 +98,16 @@ class KmaApiClient(
      */
     fun <T> extractItems(body: JsonObject?, itemSerializer: KSerializer<T>): List<T> {
         val itemsElement = body?.get("items") ?: return emptyList()
-        val itemsObject = itemsElement as? JsonObject ?: return emptyList()
-        val itemElement = itemsObject["item"] ?: return emptyList()
-
-        return when (itemElement) {
-            is JsonArray -> itemElement.map { json.decodeFromJsonElement(itemSerializer, it) }
-            is JsonObject -> listOf(json.decodeFromJsonElement(itemSerializer, itemElement))
+        return when (itemsElement) {
+            is JsonArray -> itemsElement.map { json.decodeFromJsonElement(itemSerializer, it) }
+            is JsonObject -> {
+                val itemElement = itemsElement["item"] ?: return emptyList()
+                when (itemElement) {
+                    is JsonArray -> itemElement.map { json.decodeFromJsonElement(itemSerializer, it) }
+                    is JsonObject -> listOf(json.decodeFromJsonElement(itemSerializer, itemElement))
+                    else -> emptyList()
+                }
+            }
             else -> emptyList()
         }
     }

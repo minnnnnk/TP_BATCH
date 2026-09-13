@@ -15,7 +15,7 @@ open class KmaApiService(
     companion object {
         // 단기예보 및 구역코드 API 경로 (API 허브 typ02 기준)
         const val PATH_FCST_ZONE = "/api/typ02/openApi/FcstZoneInfoService/getFcstZoneCd"
-        const val PATH_WRN_ZONE = "/api/typ02/openApi/WthrWrnInfoService/getWthrWrnList"
+        const val PATH_WRN_ZONE = "/api/typ02/openApi/WethrBasicInfoService/getWrnZoneCd"
         const val PATH_VILAGE_FCST = "/api/typ02/openApi/VilageFcstInfoService_2.0/getVilageFcst"
 
         // 중기예보 API 경로
@@ -26,18 +26,21 @@ open class KmaApiService(
     /**
      * 1) 예보구역 마스터 단일/페이지 조회 (`forecast_zone`)
      *
+     * 기본 URL: https://apihub.kma.go.kr/api/typ02/openApi/FcstZoneInfoService/getFcstZoneCd
+     * 파라미터 예시: ?pageNo=1&numOfRows=100&dataType=JSON&authKey=...
+     *
      * @param regId 특정 예보구역 코드 (생략 시 전체 조회)
-     * @param numOfRows 한 페이지 결과 수 (기본값: 1000)
+     * @param numOfRows 한 페이지 결과 수 (기본값: 100)
      * @param pageNo 페이지 번호 (기본값: 1)
      */
     open fun fetchForecastZones(
         regId: String? = null,
-        numOfRows: Int = 1000,
+        numOfRows: Int = 100,
         pageNo: Int = 1,
     ): List<ForecastZoneRecord> {
         val params = mutableMapOf(
+            "pageNo" to pageNo.toString(),
             "numOfRows" to numOfRows.toString(),
-            "pageNo" to pageNo.toString()
         )
         if (!regId.isNullOrBlank()) {
             params["regId"] = regId
@@ -62,23 +65,48 @@ open class KmaApiService(
     }
 
     /**
-     * 1-1) 북한을 제외한 대한민국 전역의 모든 예보구역 마스터 일괄 수집 (페이징 전체 순회)
+     * 1-1) 모든 예보구역 마스터 일괄 수집 (페이징 전체 순회)
      *
-     * - 기상청 구역코드 중 북한 지역 코드 (11I~11P: 황해도, 평안도, 함경도, 자강도, 량강도 등) 제외
-     * - 대한민국 전역 (11A~11H 및 해상 등) 대상
+     * pageNo를 1부터 1씩 증가시키며 데이터가 아예 없을 때(empty)까지 반복 수집
+     * @param pageSize 페이지당 행 수 (기본값: 100)
      */
-    fun fetchAllSouthKoreaForecastZones(pageSize: Int = 1000): List<ForecastZoneRecord> {
+    open fun fetchAllForecastZones(pageSize: Int = 100): List<ForecastZoneRecord> {
         val result = mutableListOf<ForecastZoneRecord>()
         var pageNo = 1
 
         while (true) {
             val pageRecords = fetchForecastZones(numOfRows = pageSize, pageNo = pageNo)
-            if (pageRecords.isEmpty()) break
+            if (pageRecords.isEmpty()) {
+                break
+            }
+            result.addAll(pageRecords)
+            pageNo++
+        }
+
+        return result
+    }
+
+    /**
+     * 1-2) 북한을 제외한 대한민국 전역의 모든 예보구역 마스터 일괄 수집 (페이징 전체 순회)
+     *
+     * - 기상청 구역코드 중 북한 지역 코드 (11I~11P: 황해도, 평안도, 함경도, 자강도, 량강도 등) 제외
+     * - 대한민국 전역 (11A~11H 및 해상 등) 대상
+     * - pageNo를 1부터 1씩 증가시키며 데이터가 아예 없을 때까지 반복 수집
+     * @param pageSize 페이지당 행 수 (기본값: 100)
+     */
+    open fun fetchAllSouthKoreaForecastZones(pageSize: Int = 100): List<ForecastZoneRecord> {
+        val result = mutableListOf<ForecastZoneRecord>()
+        var pageNo = 1
+
+        while (true) {
+            val pageRecords = fetchForecastZones(numOfRows = pageSize, pageNo = pageNo)
+            if (pageRecords.isEmpty()) {
+                break
+            }
 
             val southKoreaRecords = pageRecords.filter { isSouthKoreaZone(it.regId, it.regUp, it.regName) }
             result.addAll(southKoreaRecords)
 
-            if (pageRecords.size < pageSize) break
             pageNo++
         }
 
@@ -108,20 +136,63 @@ open class KmaApiService(
     }
 
     /**
-     * 2) 특보구역 마스터 조회 (`warning_zone`)
+     * 2) 특보구역 마스터 단일/페이지 조회 (`warning_zone`)
+     *
+     * 기본 URL: https://apihub.kma.go.kr/api/typ02/openApi/WethrBasicInfoService/getWrnZoneCd
+     * 파라미터 예시: ?pageNo=1&numOfRows=100&dataType=JSON&korName=&authKey=...
+     *
+     * @param korName 특보구역 한글명 검색어 (생략 시 전체)
+     * @param numOfRows 한 페이지 결과 수 (기본값: 100)
+     * @param pageNo 페이지 번호 (기본값: 1)
      */
-    fun fetchWarningZones(numOfRows: Int = 1000, pageNo: Int = 1): List<WarningZoneRecord> {
-        val params = mapOf("numOfRows" to numOfRows.toString(), "pageNo" to pageNo.toString())
+    open fun fetchWarningZones(
+        korName: String? = null,
+        numOfRows: Int = 100,
+        pageNo: Int = 1,
+    ): List<WarningZoneRecord> {
+        val params = mutableMapOf(
+            "pageNo" to pageNo.toString(),
+            "numOfRows" to numOfRows.toString(),
+            "korName" to (korName ?: "")
+        )
+
         val items = client.fetchItems(PATH_WRN_ZONE, params, KmaWarningZoneDto.serializer())
 
         return items.mapNotNull { dto ->
-            val wrnZoneCd = dto.wrnZoneCd?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val cd = dto.resolvedZoneCd ?: return@mapNotNull null
+            val name = dto.resolvedZoneName ?: ""
             WarningZoneRecord(
-                wrnZoneCd = wrnZoneCd,
+                wrnZoneCd = cd,
                 providerCode = "KMA",
-                wrnZoneName = dto.wrnZoneName ?: "",
+                wrnZoneName = name,
             )
         }
+    }
+
+    /**
+     * 2-1) 모든 특보구역 마스터 일괄 수집 (페이징 전체 순회)
+     *
+     * pageNo를 1부터 1씩 증가시키며 데이터가 아예 없을 때(empty)까지 반복 수집
+     * @param korName 특보구역 한글명 검색어 (생략 시 전체)
+     * @param pageSize 페이지당 행 수 (기본값: 100)
+     */
+    open fun fetchAllWarningZones(
+        korName: String? = null,
+        pageSize: Int = 100,
+    ): List<WarningZoneRecord> {
+        val result = mutableListOf<WarningZoneRecord>()
+        var pageNo = 1
+
+        while (true) {
+            val pageRecords = fetchWarningZones(korName = korName, numOfRows = pageSize, pageNo = pageNo)
+            if (pageRecords.isEmpty()) {
+                break
+            }
+            result.addAll(pageRecords)
+            pageNo++
+        }
+
+        return result
     }
 
     /**
