@@ -1,11 +1,8 @@
-# TP_BATCH2 — TourAPI 수집 & 벡터 동기화 배치 (Python)
+# TP_BATCH — TourAPI 수집 & 벡터 동기화 배치 (Python)
 
 한국관광공사 TourAPI에서 관광 데이터를 수집해 PostgreSQL에 적재하고,
 그것을 **TP_TRAVEL_AI**(FastAPI 추천 서버)가 바로 쓸 수 있는 `travel_spots`
 (pgvector 768차원)로 변환·임베딩하는 배치입니다.
-
-기존 Kotlin 배치(**TP_BATCH**)와 **같은 테이블·같은 upsert 키**를 사용하므로,
-둘을 번갈아 돌려도 데이터가 중복되거나 어긋나지 않습니다.
 
 ```text
 TourAPI ──ingest-area──▶  place                (원본, content_id UNIQUE)
@@ -23,8 +20,10 @@ TourAPI ──ingest-area──▶  place                (원본, content_id UNI
 ## 설치
 
 ```bash
-cd TP_BATCH2
-python3 -m venv venv
+python -m venv venv
+# Windows:
+.\venv\Scripts\activate
+# Linux/macOS:
 source venv/bin/activate
 
 pip install -r requirements.txt          # 수집 잡만 돌릴 때 (가볍다)
@@ -32,21 +31,15 @@ pip install -r requirements-embed.txt    # sync 잡까지 돌릴 때 (torch 포�
 ```
 
 > Python 3.9 이상에서 동작합니다. torch/sentence-transformers를 쓰는 `sync` 잡은
-> 3.11 이상 권장(`brew install python@3.11`).
+> 3.11 이상 권장.
 
 ## 설정
 
-`.env.example`을 `.env`로 복사해 채웁니다.
+`.env.example`을 참고하여 `.env`를 생성하거나, 루트의 `secrets.properties`를 활용합니다.
+루트에 `secrets.properties`가 존재하면 자동으로 DB 및 API 설정을 읽어옵니다.
 
 ```bash
 cp .env.example .env
-```
-
-기존 Kotlin 배치의 `secrets.properties`를 재사용하려면 서비스키/DB를 다시 적지 말고
-경로만 지정하면 됩니다.
-
-```dotenv
-SECRETS_PROPERTIES=/path/to/Mini_Project_1/secrets.properties
 ```
 
 **임베딩 설정은 TP_TRAVEL_AI와 반드시 동일해야 합니다.** 모델이 다르면 같은 테이블에
@@ -145,7 +138,7 @@ TP_TRAVEL_AI의 기본값은 `localhost/vector_db`라 그대로 두면 서로 �
 ## 구조
 
 ```text
-TP_BATCH2/
+TP_BATCH/
 ├── app/
 │   ├── cli.py            # 커맨드라인 진입점
 │   ├── config.py         # .env / 환경변수 / secrets.properties 로딩

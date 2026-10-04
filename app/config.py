@@ -27,9 +27,11 @@ _SECRETS_KEY_MAP = {
 
 def _load_secrets_properties() -> Dict[str, str]:
     path = os.getenv("SECRETS_PROPERTIES")
-    if not path:
-        return {}
-    file = Path(path).expanduser()
+    if path:
+        file = Path(path).expanduser()
+    else:
+        file = Path(__file__).resolve().parent.parent / "secrets.properties"
+
     if not file.exists():
         return {}
 
