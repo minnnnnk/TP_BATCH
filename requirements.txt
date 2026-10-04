@@ -1,4 +1,4 @@
-# 수집 잡(ingest-area / ingest-gallery / enrich / status)에 필요한 최소 의존성
+# Minimal dependencies for ingestion jobs
 requests>=2.31.0
 psycopg2-binary>=2.9.9
 python-dotenv>=1.0.1

@@ -1,6 +1,13 @@
 # Environment and secrets
 .env
-secrets.properties
+.env.*
+!.env.example
+secrets*.properties
+!secrets*.properties.example
+secrets-*.properties
+api_keys*
+.secrets/
+*.key
 
 # Python
 __pycache__/
