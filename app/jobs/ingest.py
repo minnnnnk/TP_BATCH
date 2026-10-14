@@ -22,14 +22,21 @@ SOURCE_GALLERY = "galleryList1"
 
 
 def ingest_area(
-    conn: PgConnection,
+    conn: Optional[PgConnection],
     settings: Settings,
     area_code: Optional[str] = None,
     content_type_id: Optional[str] = None,
     max_pages: Optional[int] = None,
     restart: bool = False,
+    dry_run: bool = False,
 ) -> int:
-    """지역기반 관광정보를 수집해 place에 upsert 한다."""
+    """지역기반 관광정보를 수집해 place에 upsert 한다 (dry_run 시 DB 삽입 없음)."""
+    if not settings.tour_api_service_key:
+        raise RuntimeError(
+            "TourAPI 서비스키가 설정되지 않았습니다. .env 또는 secrets.properties에 "
+            "TOUR_API_SERVICE_KEY (tour.api.serviceKey)를 설정하세요."
+        )
+
     client = TourApiClient(
         settings.kor_service_base_url,
         settings.tour_api_service_key,
@@ -45,10 +52,16 @@ def ingest_area(
     if content_type_id:
         source_key += ":type={0}".format(content_type_id)
 
-    start_page = 1 if restart else repository.get_last_page(conn, source_key) + 1
-    pages = max_pages if max_pages is not None else settings.max_pages
+    if dry_run or conn is None:
+        start_page = 1
+        pages = max_pages or 1
+    else:
+        start_page = 1 if restart else repository.get_last_page(conn, source_key) + 1
+        pages = max_pages if max_pages is not None else settings.max_pages
+
     log.info(
-        "[ingest-area] source=%s, %s페이지부터 최대 %s페이지 수집",
+        "[ingest-area%s] source=%s, %s페이지부터 %s페이지 수집 시작",
+        " (dry-run)" if dry_run else "",
         source_key,
         start_page,
         pages,
@@ -66,8 +79,17 @@ def ingest_area(
         client.close()
 
     if not result.items:
-        log.info("[ingest-area] 새로 가져온 항목이 없습니다. (커서 유지)")
+        log.info("[ingest-area] 새로 가져온 항목이 없습니다.")
         return 0
+
+    if dry_run or conn is None:
+        log.info("[ingest-area --dry-run] API 수신 성공: 총 %s건 수신 (전체 %s건 중)", len(result.items), result.total_count)
+        for i, item in enumerate(result.items[:5], 1):
+            log.info("  [%s] contentid=%s | title=%s | addr=%s | coords=(%s, %s)",
+                     i, item.get("contentid"), item.get("title"), item.get("addr1"), item.get("mapy"), item.get("mapx"))
+        if len(result.items) > 5:
+            log.info("  ... 외 %s건 추가 수신됨 (DB 삽입 없이 테스트 완료)", len(result.items) - 5)
+        return len(result.items)
 
     saved = repository.save_place_items(conn, result.items, settings.chunk_size)
     repository.save_cursor(

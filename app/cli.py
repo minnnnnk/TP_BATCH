@@ -52,6 +52,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_area.add_argument(
         "--restart", action="store_true", help="커서를 무시하고 1페이지부터 다시 수집"
     )
+    p_area.add_argument(
+        "--dry-run", action="store_true", help="DB 저장 없이 API 수집 데이터만 콘솔에 출력"
+    )
 
     p_gallery = sub.add_parser("ingest-gallery", help="관광사진 갤러리 수집")
     p_gallery.add_argument("--max-pages", type=int, help="이번 실행에서 읽을 최대 페이지 수")
@@ -105,7 +108,8 @@ def main(argv=None) -> int:
             if args.with_vector:
                 init_vector_schema(conn, settings.embedding_dimension)
         elif args.command == "ingest-area":
-            init_ingest_schema(conn)
+            if not args.dry_run:
+                init_ingest_schema(conn)
             ingest_area(
                 conn,
                 settings,
@@ -113,6 +117,7 @@ def main(argv=None) -> int:
                 content_type_id=args.content_type_id,
                 max_pages=args.max_pages,
                 restart=args.restart,
+                dry_run=args.dry_run,
             )
         elif args.command == "ingest-gallery":
             init_ingest_schema(conn)

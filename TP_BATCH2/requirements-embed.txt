@@ -1,7 +1,0 @@
-# sync 잡(place -> travel_spots)에만 필요한 임베딩 의존성.
-# torch가 무거워서 수집 전용 환경과 분리해 두었다.
--r requirements.txt
-sentence-transformers>=2.5.1
-torch>=2.2.0
-transformers>=4.38.0
-numpy>=1.26.0

@@ -14,38 +14,75 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Kotlin 배치의 secrets.properties 키 -> 이 프로젝트의 환경변수 키
+# 시크릿 파일 키 매핑 (Kotlin 형식 및 표준 환경변수 형식 모두 지원)
 _SECRETS_KEY_MAP = {
     "tour.api.serviceKey": "TOUR_API_SERVICE_KEY",
+    "TOUR_API_SERVICE_KEY": "TOUR_API_SERVICE_KEY",
+    "kma.api.authKey": "KMA_API_AUTH_KEY",
+    "KMA_API_AUTH_KEY": "KMA_API_AUTH_KEY",
     "db.host": "DB_HOST",
     "db.port": "DB_PORT",
     "db.name": "DB_NAME",
     "db.user": "DB_USER",
     "db.password": "DB_PASSWORD",
+    "DB_HOST": "DB_HOST",
+    "DB_PORT": "DB_PORT",
+    "DB_NAME": "DB_NAME",
+    "DB_USER": "DB_USER",
+    "DB_PASSWORD": "DB_PASSWORD",
 }
 
 
-def _load_secrets_properties() -> Dict[str, str]:
-    path = os.getenv("SECRETS_PROPERTIES")
-    if not path:
-        return {}
-    file = Path(path).expanduser()
+def _parse_properties_file(file: Path) -> Dict[str, str]:
     if not file.exists():
         return {}
-
     loaded: Dict[str, str] = {}
-    for line in file.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        env_key = _SECRETS_KEY_MAP.get(key.strip())
-        if env_key and value.strip():
-            loaded[env_key] = value.strip()
+    try:
+        for line in file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            env_key = _SECRETS_KEY_MAP.get(key.strip())
+            if env_key and value.strip():
+                loaded[env_key] = value.strip()
+    except Exception as e:
+        pass
     return loaded
 
 
-_SECRETS = _load_secrets_properties()
+def _load_all_secrets() -> Dict[str, str]:
+    """DB 정보와 API 키를 분리된 시크릿 파일에서 각각 읽어온다.
+
+    우선순위:
+    1. secrets-api.properties (API 키 전용 시크릿 파일)
+    2. secrets.properties (기존 레거시 또는 DB 시크릿 파일)
+    3. 환경변수 API_SECRETS_FILE / SECRETS_PROPERTIES 명시 경로
+    """
+    secrets: Dict[str, str] = {}
+    root = Path(__file__).resolve().parent.parent
+
+    # 1. DB 설정 파일 로드
+    secrets.update(_parse_properties_file(root / "secrets.properties"))
+    secrets.update(_parse_properties_file(root / "secrets-db.properties"))
+
+    # 2. 분리된 API 키 전용 파일 로드 (접근 격리)
+    api_secrets_env = os.getenv("API_SECRETS_FILE")
+    if api_secrets_env:
+        secrets.update(_parse_properties_file(Path(api_secrets_env).expanduser()))
+    else:
+        secrets.update(_parse_properties_file(root / "secrets-api.properties"))
+        secrets.update(_parse_properties_file(root / "api_keys.properties"))
+
+    # 3. 사용자 지정 통합 시크릿 파일
+    custom_path = os.getenv("SECRETS_PROPERTIES")
+    if custom_path:
+        secrets.update(_parse_properties_file(Path(custom_path).expanduser()))
+
+    return secrets
+
+
+_SECRETS = _load_all_secrets()
 
 
 def _value(key: str, default: Optional[str] = None) -> Optional[str]:
@@ -104,7 +141,7 @@ class Settings:
 
 def load_settings() -> Settings:
     return Settings(
-        tour_api_service_key=_required("TOUR_API_SERVICE_KEY"),
+        tour_api_service_key=_value("TOUR_API_SERVICE_KEY", ""),
         kor_service_base_url=_value(
             "KOR_SERVICE_BASE_URL", "https://apis.data.go.kr/B551011/KorService2"
         ),
