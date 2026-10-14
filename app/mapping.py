@@ -6,6 +6,8 @@ TourAPI 코드값을 사람이 읽는 값으로 풀어준다.
 """
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.detail_parser import format_minutes
+
 # 지역코드 -> 시도명 (areaCode)
 AREA_CODE_TO_NAME = {
     "1": "서울특별시",
@@ -91,12 +93,35 @@ def resolve_region(addr1: Optional[str], area_code: Optional[str]) -> Optional[s
     return None
 
 
-def resolve_category(content_type_id: Optional[str], cat1: Optional[str], cat3: Optional[str]) -> str:
+# 신분류체계 대분류(lclsSystm1) -> 카테고리. 2025년 이후 등록·수정된 장소는 cat1~3가 비어 있어
+# (전체의 약 57%) 관광지(12)가 모두 '관광지'로 뭉뚱그려지므로, enrich가 받아 둔 신분류로 가른다.
+LCLS1_TO_CATEGORY = {
+    "NA": "자연",
+    "HS": "문화/역사",
+    "VE": "문화/역사",
+    "EX": "액티비티",
+    "LS": "액티비티",
+}
+# 대분류만으로 어긋나는 중분류
+LCLS2_TO_CATEGORY = {
+    "VE02": "액티비티",  # 테마파크·워터파크·동물원
+    "VE03": "자연",  # 도시공원
+}
+CAFE_LCLS2 = "FD05"  # 카페/찻집
+
+
+def resolve_category(
+    content_type_id: Optional[str],
+    cat1: Optional[str],
+    cat3: Optional[str],
+    lcls1: Optional[str] = None,
+    lcls2: Optional[str] = None,
+) -> str:
     """contentTypeId + 분류코드를 TP_TRAVEL_AI 카테고리로 환산한다."""
     ctype = str(content_type_id) if content_type_id else None
 
     if ctype == "39":
-        return "카페" if cat3 in CAFE_CAT3 else "맛집"
+        return "카페" if cat3 in CAFE_CAT3 or lcls2 == CAFE_LCLS2 else "맛집"
     if ctype == "28":
         return "액티비티"
     if ctype == "14":
@@ -115,7 +140,7 @@ def resolve_category(content_type_id: Optional[str], cat1: Optional[str], cat3: 
             return "자연"
         if cat1 == "A02":
             return "문화/역사"
-        return "관광지"
+        return LCLS2_TO_CATEGORY.get(lcls2 or "") or LCLS1_TO_CATEGORY.get(lcls1 or "", "관광지")
 
     if cat1 == "A01":
         return "자연"
@@ -129,8 +154,8 @@ def resolve_category(content_type_id: Optional[str], cat1: Optional[str], cat3: 
 def build_description(row: Dict[str, Any], region: Optional[str], category: str) -> str:
     """임베딩 원문이 될 설명문.
 
-    areaBasedList2에는 상세 설명이 없어서, overview(enrich 잡으로 채움)가 있으면
-    그것을 본문으로 쓰고 없으면 메타데이터로 최소한의 문장을 합성한다.
+    areaBasedList2에는 상세 설명이 없어서, overview(enrich 잡이 place_detail에 채움)가
+    있으면 그것을 본문으로 쓰고 없으면 메타데이터로 최소한의 문장을 합성한다.
     """
     title = row.get("title") or "이름 미상"
     parts: List[str] = []
@@ -171,11 +196,13 @@ def build_metadata(row: Dict[str, Any], category: str) -> Dict[str, Any]:
     if row.get("first_image"):
         tags.append("사진있음")
 
+    # 실내외 판정(place_detail.indoor_type)이 있으면 그것을, 없으면 카테고리로 추정한다.
+    indoor_type = row.get("indoor_type")
     weather: List[str] = ["맑음", "흐림"]
-    if category in INDOOR_CATEGORIES:
+    if indoor_type == "indoor" or (indoor_type is None and category in INDOOR_CATEGORIES):
         weather.append("비오는날_실내")
 
-    return {
+    metadata = {
         "source": "TourAPI",
         "source_content_id": row.get("content_id"),
         "content_type_id": row.get("content_type_id"),
@@ -195,6 +222,44 @@ def build_metadata(row: Dict[str, Any], category: str) -> Dict[str, Any]:
         "weather_suitability": weather,
         "estimated_stay_min": STAY_MINUTES.get(category, DEFAULT_STAY_MINUTES),
         "source_modified_time": row.get("source_modified_time"),
+    }
+    if row.get("detail_version"):
+        metadata.update(build_detail_metadata(row))
+    return metadata
+
+
+def build_detail_metadata(row: Dict[str, Any]) -> Dict[str, Any]:
+    """place_detail(B-10) 값을 RAG 필터(C-12)가 쓰기 좋은 형태로 옮긴다.
+
+    시각은 사람이 읽는 'HH:MM'과 비교용 분(min)을 함께 둔다. 자정을 넘기면 '26:00'처럼 표기한다.
+    정제 못 한 원문(use_time_text / rest_date_text)도 넘겨 LLM이 참고하게 한다.
+    """
+    event = None
+    if row.get("event_start_date") or row.get("event_end_date"):
+        event = {
+            "start": row["event_start_date"].isoformat() if row.get("event_start_date") else None,
+            "end": row["event_end_date"].isoformat() if row.get("event_end_date") else None,
+        }
+    hours = None
+    if row.get("open_min") is not None:
+        hours = {
+            "open": format_minutes(row["open_min"]),
+            "close": format_minutes(row["close_min"]),
+            "open_min": row["open_min"],
+            "close_min": row["close_min"],
+            "always_open": bool(row.get("always_open")),
+        }
+    return {
+        "indoor_type": row.get("indoor_type"),
+        "opening_hours": hours,
+        "closed_weekdays": list(row.get("closed_weekdays") or []),
+        "closed_on_holidays": bool(row.get("closed_on_holidays")),
+        "closed_irregular": bool(row.get("closed_irregular")),
+        "no_closure": bool(row.get("no_closure")),
+        "use_time_text": row.get("use_time_text"),
+        "rest_date_text": row.get("rest_date_text"),
+        "event_period": event,
+        "detail_version": row.get("detail_version"),
     }
 
 
@@ -242,7 +307,13 @@ def map_place_row(row: Dict[str, Any]) -> Optional[Tuple[Dict[str, Any], str]]:
     if not region:
         return None
 
-    category = resolve_category(row.get("content_type_id"), row.get("cat1"), row.get("cat3"))
+    category = resolve_category(
+        row.get("content_type_id"),
+        row.get("cat1"),
+        row.get("cat3"),
+        row.get("lcls_systm1"),
+        row.get("lcls_systm2"),
+    )
     description = build_description(row, region, category)
     metadata = build_metadata(row, category)
 

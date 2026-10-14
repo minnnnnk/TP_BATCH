@@ -3,9 +3,10 @@
 TP_BATCH2가 적재한 TourAPI 원본(place)을 TP_TRAVEL_AI가 추천에 쓰는
 travel_spots 형태로 변환하고, ko-sroberta로 임베딩해 upsert 한다.
 
-증분 기준은 source_content_id + source_modified_time이다.
+증분 기준은 source_content_id + source_modified_time + detail_version이다.
   - travel_spots에 아직 없는 장소
   - TourAPI 수정일시가 바뀐 장소 (metadata->>'source_modified_time' 비교)
+  - place_detail(B-10)이 새로 채워지거나 바뀐 장소 (metadata->>'detail_version' 비교)
 따라서 여러 번 돌려도 이미 임베딩한 장소를 다시 계산하지 않는다.
 """
 import json
@@ -16,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from psycopg2.extensions import connection as PgConnection
 from psycopg2.extras import RealDictCursor, execute_values
 
+from app import repository
 from app.config import Settings
 from app.embedding import EmbeddingService, to_pgvector_literal
 from app.mapping import map_place_row
@@ -26,43 +28,69 @@ PLACE_SELECT_COLUMNS = """
     p.content_id, p.content_type_id, p.title, p.addr1, p.addr2,
     p.area_code, p.sigungu_code, p.cat1, p.cat2, p.cat3,
     p.first_image, p.first_image2, p.map_x, p.map_y,
-    p.tel, p.zipcode, p.overview, p.source_modified_time
+    p.tel, p.zipcode, p.source_modified_time
 """
 
-# 아직 동기화되지 않았거나, TourAPI 수정일시가 달라진 장소만 고른다.
+# place_detail(B-10) 값. 아직 안 채운 장소는 전부 NULL이다.
+DETAIL_VERSION_SQL = "(extract(epoch FROM d.updated_at)::bigint)::text"
+DETAIL_SELECT_COLUMNS = """
+    d.overview, d.indoor_type, d.open_min, d.close_min, d.always_open,
+    d.closed_weekdays, d.closed_on_holidays, d.closed_irregular, d.no_closure,
+    d.use_time_text, d.rest_date_text, d.event_start_date, d.event_end_date,
+    d.lcls_systm1, d.lcls_systm2,
+    {version} AS detail_version
+""".format(version=DETAIL_VERSION_SQL)
+_DETAIL_NAMES = (
+    "overview", "indoor_type", "open_min", "close_min", "always_open",
+    "closed_weekdays", "closed_on_holidays", "closed_irregular", "no_closure",
+    "use_time_text", "rest_date_text", "event_start_date", "event_end_date",
+    "lcls_systm1", "lcls_systm2", "detail_version",
+)
+# dry-run에서 place_detail이 아직 없을 때 쓰는 자리 채움
+DETAIL_NULL_COLUMNS = ", ".join("NULL AS {0}".format(n) for n in _DETAIL_NAMES)
+
+SELECT_COLUMNS = PLACE_SELECT_COLUMNS + "," + DETAIL_SELECT_COLUMNS
+DETAIL_JOIN = "LEFT JOIN place_detail d ON d.content_id = p.content_id"
+
+# 아직 동기화되지 않았거나, TourAPI 수정일시나 상세정보가 달라진 장소만 고른다.
 PENDING_WHERE = """
     p.title IS NOT NULL AND p.map_x IS NOT NULL AND p.map_y IS NOT NULL
     AND (
         t.source_content_id IS NULL
         OR COALESCE(t.metadata->>'source_modified_time', '')
            IS DISTINCT FROM COALESCE(p.source_modified_time, '')
+        OR COALESCE(t.metadata->>'detail_version', '')
+           IS DISTINCT FROM COALESCE({version}, '')
     )
-"""
+""".format(version=DETAIL_VERSION_SQL)
 
 SELECT_PENDING = """
 SELECT {cols}
 FROM place p
+{join}
 LEFT JOIN travel_spots t ON t.source_content_id = p.content_id
 WHERE {where}
 ORDER BY p.id
 LIMIT %s
-""".format(cols=PLACE_SELECT_COLUMNS, where=PENDING_WHERE)
+""".format(cols=SELECT_COLUMNS, join=DETAIL_JOIN, where=PENDING_WHERE)
 
 # dry-run 전용: travel_spots가 아직 없어도 매핑을 확인할 수 있게 place만 읽는다.
 SELECT_PLACE_SAMPLE = """
 SELECT {cols}
 FROM place p
+{join}
 WHERE p.title IS NOT NULL AND p.map_x IS NOT NULL AND p.map_y IS NOT NULL
 ORDER BY p.id
 LIMIT %s
-""".format(cols=PLACE_SELECT_COLUMNS)
+"""
 
 COUNT_PENDING = """
 SELECT count(*)
 FROM place p
+{join}
 LEFT JOIN travel_spots t ON t.source_content_id = p.content_id
 WHERE {where}
-""".format(where=PENDING_WHERE)
+""".format(join=DETAIL_JOIN, where=PENDING_WHERE)
 
 UPSERT_SPOTS = """
 INSERT INTO travel_spots
@@ -185,8 +213,15 @@ def sync_spots(
 
 def _dry_run(conn: PgConnection, sample_size: int) -> int:
     """임베딩 없이 매핑 결과만 출력한다. DB는 읽기만 한다."""
+    if repository.table_exists(conn, "place_detail"):
+        sql = SELECT_PLACE_SAMPLE.format(cols=SELECT_COLUMNS, join=DETAIL_JOIN)
+    else:
+        log.info("[sync --dry-run] place_detail이 아직 없어 상세정보 없이 매핑합니다.")
+        sql = SELECT_PLACE_SAMPLE.format(
+            cols=PLACE_SELECT_COLUMNS + ", " + DETAIL_NULL_COLUMNS, join=""
+        )
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(SELECT_PLACE_SAMPLE, (sample_size,))
+        cur.execute(sql, (sample_size,))
         rows = [dict(r) for r in cur.fetchall()]
     shown = 0
     for row in rows:
@@ -195,13 +230,17 @@ def _dry_run(conn: PgConnection, sample_size: int) -> int:
             log.info("  [skip] content_id=%s (좌표/이름/지역 결측)", row.get("content_id"))
             continue
         spot, text = result
+        meta = spot["metadata"]
         log.info(
-            "  [ok] %s | %s | %s (%.5f, %.5f)",
+            "  [ok] %s | %s | %s (%.5f, %.5f) 실내외=%s 운영=%s 휴무=%s",
             spot["name"],
             spot["region"],
             spot["category"],
             spot["latitude"],
             spot["longitude"],
+            meta.get("indoor_type"),
+            meta.get("opening_hours"),
+            meta.get("closed_weekdays"),
         )
         log.info("       임베딩 원문: %s", text[:160] + ("..." if len(text) > 160 else ""))
         shown += 1

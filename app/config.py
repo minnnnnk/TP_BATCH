@@ -8,7 +8,7 @@ secrets.properties를 함께 읽는 이유는, 기존 Kotlin 배치(TP_BATCH)가
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -95,6 +95,18 @@ def _value(key: str, default: Optional[str] = None) -> Optional[str]:
     return default
 
 
+def _csv(key: str, default: str = "") -> Tuple[str, ...]:
+    raw = _value(key, default) or ""
+    return tuple(v.strip() for v in raw.split(",") if v.strip())
+
+
+def _bool(key: str, default: bool) -> bool:
+    raw = _value(key)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
 def _required(key: str) -> str:
     value = _value(key)
     if not value:
@@ -132,6 +144,17 @@ class Settings:
     embedding_device: str
     embedding_batch_size: int
 
+    # 일일 호출 한도 / 스케줄 (daily, schedule)
+    tour_api_daily_limit: int  # 서비스(KorService2, PhotoGalleryService1)별 하루 상한
+    daily_cron: str  # 한국 시간 기준 crontab 표현식
+    daily_refresh_max_pages: int  # 최근 수정분 갱신에 쓸 최대 페이지 수
+    daily_gallery_max_pages: int
+
+    # 상세정보 보강 (enrich, B-10)
+    detail_with_overview: bool  # detailCommon2(개요·신분류코드)도 함께 받을지 — 장소당 호출 2회
+    detail_priority_types: Tuple[str, ...]  # 먼저 채울 관광타입 (예: 12,14,39)
+    detail_priority_areas: Tuple[str, ...]  # 먼저 채울 지역코드 (예: 32,39)
+
     @property
     def dsn(self) -> str:
         return "host={0} port={1} dbname={2} user={3} password={4}".format(
@@ -163,4 +186,13 @@ def load_settings() -> Settings:
         embedding_dimension=int(_value("EMBEDDING_DIMENSION", "768")),
         embedding_device=_value("EMBEDDING_DEVICE", "cpu"),
         embedding_batch_size=int(_value("EMBEDDING_BATCH_SIZE", "64")),
+        # 개발계정 1,000건 중 수동 테스트·다른 배치 몫으로 100건을 남겨 둔다.
+        tour_api_daily_limit=int(_value("TOUR_API_DAILY_LIMIT", "900")),
+        daily_cron=_value("DAILY_CRON", "0 4 * * *"),
+        daily_refresh_max_pages=int(_value("DAILY_REFRESH_MAX_PAGES", "10")),
+        daily_gallery_max_pages=int(_value("DAILY_GALLERY_MAX_PAGES", "70")),
+        detail_with_overview=_bool("DETAIL_WITH_OVERVIEW", True),
+        # 일정 짜기에 직접 쓰이는 타입(관광지·문화시설·음식점·레포츠·쇼핑)을 먼저 채운다.
+        detail_priority_types=_csv("DETAIL_PRIORITY_TYPES", "12,14,39,28,38"),
+        detail_priority_areas=_csv("DETAIL_PRIORITY_AREAS", ""),
     )

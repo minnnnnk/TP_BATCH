@@ -13,9 +13,15 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from app.quota import QuotaExhausted
+
 log = logging.getLogger(__name__)
 
 Item = Dict[str, Any]
+
+# 공공데이터포털이 한도 초과 시 내려주는 코드/문구 (JSON header 또는 XML 에러 문서)
+LIMIT_EXCEEDED_CODE = "22"
+LIMIT_EXCEEDED_TEXT = "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS"
 
 
 class TourApiError(RuntimeError):
@@ -48,11 +54,18 @@ class TourApiClient:
         service_key: str,
         mobile_app: str = "TP_BATCH2",
         timeout_sec: int = 20,
+        quota=None,
     ):
+        """
+        :param quota: app.quota.DailyQuota. 주어지면 호출마다 일일 카운트를 올리고,
+            한도에 닿으면 QuotaExhausted를 던진다.
+        """
         self.base_url = base_url.rstrip("/")
         self.service_key = service_key
         self.mobile_app = mobile_app
         self.timeout_sec = timeout_sec
+        self.quota = quota
+        self.service = service_name(self.base_url)
 
         # 공공데이터포털은 순간적인 5xx/타임아웃이 잦아 재시도를 붙인다.
         retry = Retry(
@@ -124,8 +137,18 @@ class TourApiClient:
         }
         query.update(params)
 
+        if self.quota is not None:
+            self.quota.acquire(self.service)
+
         url = "{0}/{1}".format(self.base_url, operation)
-        response = self.session.get(url, params=query, timeout=self.timeout_sec)
+        try:
+            response = self.session.get(url, params=query, timeout=self.timeout_sec)
+        except requests.exceptions.RetryError as exc:
+            if "429" in str(exc):
+                self._on_server_limit("HTTP 429")
+            raise
+        if LIMIT_EXCEEDED_TEXT in response.text[:2000]:
+            self._on_server_limit(LIMIT_EXCEEDED_TEXT)
         if not (200 <= response.status_code < 300):
             raise RuntimeError(
                 "TourAPI HTTP {0} 응답: {1}".format(
@@ -145,8 +168,20 @@ class TourApiClient:
         result_code = header.get("resultCode")
         result_msg = header.get("resultMsg", "unknown")
         if result_code is not None and str(result_code) != "0000":
+            if str(result_code) == LIMIT_EXCEEDED_CODE:
+                self._on_server_limit(str(result_msg))
             raise TourApiError(str(result_code), str(result_msg))
         return root
+
+    def _on_server_limit(self, detail: str) -> None:
+        if self.quota is not None:
+            self.quota.mark_exhausted(self.service)
+        raise QuotaExhausted(self.service, "서버 응답: {0}".format(detail))
+
+
+def service_name(base_url: str) -> str:
+    """한도는 서비스 단위로 매겨진다: .../B551011/KorService2 -> "KorService2"."""
+    return base_url.rstrip("/").rsplit("/", 1)[-1]
 
 
 def _extract_items(body: Dict[str, Any]) -> List[Item]:

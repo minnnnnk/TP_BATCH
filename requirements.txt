@@ -1,4 +1,5 @@
-# Minimal dependencies for ingestion jobs
+# 수집·정제·스케줄 잡(ingest / refresh / enrich / daily / schedule / status)에 필요한 의존성
 requests>=2.31.0
 psycopg2-binary>=2.9.9
 python-dotenv>=1.0.1
+APScheduler>=3.10,<4

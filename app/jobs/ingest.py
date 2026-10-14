@@ -3,9 +3,11 @@
 개발계정 일일 호출 한도 때문에 한 번에 전량을 못 가져오므로,
 fetch_cursor에 마지막 페이지를 기록해두고 다음 실행에서 이어받는다.
 (Kotlin 배치의 FetchCursorTable과 같은 테이블/같은 의미)
+
+전량 수집이 끝난 뒤에는 refresh_places로 최근 수정분만 따라잡는다.
 """
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from psycopg2.extensions import connection as PgConnection
 
@@ -21,6 +23,16 @@ SOURCE_AREA = "areaBasedList2"
 SOURCE_GALLERY = "galleryList1"
 
 
+def make_client(settings: Settings, base_url: str, quota=None) -> TourApiClient:
+    return TourApiClient(
+        base_url,
+        settings.tour_api_service_key,
+        settings.mobile_app,
+        settings.request_timeout_sec,
+        quota=quota,
+    )
+
+
 def ingest_area(
     conn: Optional[PgConnection],
     settings: Settings,
@@ -29,6 +41,7 @@ def ingest_area(
     max_pages: Optional[int] = None,
     restart: bool = False,
     dry_run: bool = False,
+    quota=None,
 ) -> int:
     """지역기반 관광정보를 수집해 place에 upsert 한다 (dry_run 시 DB 삽입 없음)."""
     if not settings.tour_api_service_key:
@@ -37,12 +50,7 @@ def ingest_area(
             "TOUR_API_SERVICE_KEY (tour.api.serviceKey)를 설정하세요."
         )
 
-    client = TourApiClient(
-        settings.kor_service_base_url,
-        settings.tour_api_service_key,
-        settings.mobile_app,
-        settings.request_timeout_sec,
-    )
+    client = make_client(settings, settings.kor_service_base_url, quota)
     api = KorServiceApi(client)
 
     # 조건별로 페이지 번호 체계가 달라지므로 커서 키도 조건별로 나눈다.
@@ -106,19 +114,70 @@ def ingest_area(
     return saved
 
 
+def refresh_places(
+    conn: PgConnection,
+    settings: Settings,
+    max_pages: Optional[int] = None,
+    quota=None,
+) -> Dict[str, Any]:
+    """최근 수정된 장소만 따라잡는다 (B-08 일일 갱신).
+
+    전국 목록을 수정일 최신순(arrange=C)으로 앞에서부터 읽고, DB에 있는 가장 최근
+    수정일시(watermark)보다 오래된 항목이 나오면 멈춘다. 보통 하루 1~3페이지면 끝난다.
+    수정일시가 바뀐 장소는 place_detail과 어긋나므로 다음 enrich에서 다시 조회된다.
+
+    한계: 목록 API는 '표출 중'인 장소만 주므로, TourAPI에서 내려간 장소는 지워지지 않는다.
+    """
+    watermark = repository.max_place_modified_time(conn)
+    pages = max_pages if max_pages is not None else settings.daily_refresh_max_pages
+    log.info("[refresh] 기준 수정일시 %s 이후 변경분 조회 (최대 %s페이지)", watermark, pages)
+
+    client = make_client(settings, settings.kor_service_base_url, quota)
+    api = KorServiceApi(client)
+    saved = 0
+    pages_read = 0
+    caught_up = False
+    try:
+        for page_no in range(1, pages + 1):
+            page = api.fetch_recent_page(page_no, settings.num_of_rows)
+            pages_read = page_no
+            if not page.items:
+                caught_up = True
+                break
+            saved += repository.save_place_items(conn, page.items, settings.chunk_size)
+            oldest = min(str(i.get("modifiedtime") or "") for i in page.items)
+            if watermark and oldest <= watermark:
+                caught_up = True
+                break
+    finally:
+        client.close()
+
+    log.info(
+        "[refresh] %s페이지, %s건 upsert (%s)",
+        pages_read,
+        saved,
+        "최신 상태" if caught_up else "변경분이 더 남음 — 다음 실행에서 이어서",
+    )
+    return {"pages": pages_read, "upserted": saved, "caught_up": caught_up}
+
+
+def gallery_done(conn: PgConnection, settings: Settings) -> bool:
+    """갤러리 커서가 마지막 페이지까지 갔는지."""
+    for source, last_page, total in repository.list_cursors(conn):
+        if source == SOURCE_GALLERY:
+            return total > 0 and last_page * settings.num_of_rows >= total
+    return False
+
+
 def ingest_gallery(
     conn: PgConnection,
     settings: Settings,
     max_pages: Optional[int] = None,
     restart: bool = False,
+    quota=None,
 ) -> int:
     """관광사진 갤러리를 수집해 place_gallery_image에 upsert 한다."""
-    client = TourApiClient(
-        settings.photo_gallery_base_url,
-        settings.tour_api_service_key,
-        settings.mobile_app,
-        settings.request_timeout_sec,
-    )
+    client = make_client(settings, settings.photo_gallery_base_url, quota)
     api = GalleryImageApi(client)
 
     start_page = 1 if restart else repository.get_last_page(conn, SOURCE_GALLERY) + 1
@@ -152,53 +211,3 @@ def ingest_gallery(
         "수집 완료" if result.exhausted else "남은 페이지 있음",
     )
     return saved
-
-
-def enrich_overview(
-    conn: PgConnection, settings: Settings, limit: int = 200
-) -> int:
-    """overview가 비어 있는 place를 detailCommon2로 채운다.
-
-    장소 1건당 API 1회라 호출 비용이 크다. 기본값을 작게 두고 --limit으로 조절한다.
-    설명문이 임베딩 품질을 좌우하므로, 추천 정확도를 올리려면 이 잡을 여러 번 나눠 돌린다.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT content_id FROM place "
-            "WHERE overview IS NULL OR overview = '' "
-            "ORDER BY id LIMIT %s",
-            (limit,),
-        )
-        content_ids = [r[0] for r in cur.fetchall()]
-
-    if not content_ids:
-        log.info("[enrich] overview가 비어 있는 장소가 없습니다.")
-        return 0
-
-    client = TourApiClient(
-        settings.kor_service_base_url,
-        settings.tour_api_service_key,
-        settings.mobile_app,
-        settings.request_timeout_sec,
-    )
-    api = KorServiceApi(client)
-
-    pairs = []
-    try:
-        for idx, content_id in enumerate(content_ids, start=1):
-            try:
-                detail = api.fetch_detail_common(content_id)
-            except Exception as exc:  # 한 건 실패로 전체를 멈추지 않는다
-                log.warning("[enrich] contentId=%s 조회 실패: %s", content_id, exc)
-                continue
-            overview = (detail or {}).get("overview")
-            if overview:
-                pairs.append((content_id, str(overview).strip()))
-            if idx % 50 == 0:
-                log.info("[enrich] %s/%s 조회", idx, len(content_ids))
-    finally:
-        client.close()
-
-    updated = repository.save_overviews(conn, pairs, settings.chunk_size)
-    log.info("[enrich] %s건 overview 갱신 (조회 %s건)", updated, len(content_ids))
-    return updated

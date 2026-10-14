@@ -1,13 +1,14 @@
-"""place / place_gallery_image / fetch_cursor 적재 계층.
+"""place / place_gallery_image / fetch_cursor / place_detail 적재 계층.
 
 Kotlin TourRepository.kt와 동일하게 content_id(= gal_content_id) 기준 upsert라,
 같은 페이지를 다시 읽어도 중복 행이 생기지 않는다.
 """
+import json
 import logging
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from psycopg2.extensions import connection as PgConnection
-from psycopg2.extras import execute_values
+from psycopg2.extras import Json, execute_values
 
 from app.tourapi.client import float_or_none, text_or_none
 
@@ -148,21 +149,107 @@ def save_gallery_items(
     )
 
 
-def save_overviews(
-    conn: PgConnection, pairs: Sequence[Tuple[str, str]], chunk_size: int = 500
+DETAIL_COLUMNS: Tuple[str, ...] = (
+    "content_id",
+    "content_type_id",
+    "overview",
+    "homepage",
+    "lcls_systm1",
+    "lcls_systm2",
+    "lcls_systm3",
+    "ldong_regn_cd",
+    "ldong_signgu_cd",
+    "use_time_text",
+    "rest_date_text",
+    "parking_text",
+    "use_fee_text",
+    "intro_raw",
+    "open_min",
+    "close_min",
+    "always_open",
+    "hours_detail",
+    "closed_weekdays",
+    "closed_on_holidays",
+    "closed_irregular",
+    "no_closure",
+    "event_start_date",
+    "event_end_date",
+    "indoor_type",
+    "indoor_source",
+    "parse_status",
+    "source_modified_time",
+    "intro_fetched_at",
+    "common_fetched_at",
+)
+_JSON_DETAIL_COLUMNS = ("intro_raw", "hours_detail")
+
+
+def save_place_details(
+    conn: PgConnection, rows: Sequence[Dict[str, Any]], chunk_size: int = 500
 ) -> int:
-    """(content_id, overview) 목록을 place에 반영한다."""
-    if not pairs:
+    """detail_parser.build_detail_row 결과(+ *_fetched_at)를 place_detail에 upsert 한다."""
+    if not rows:
         return 0
+    values = [
+        tuple(
+            Json(row.get(c) or {}) if c in _JSON_DETAIL_COLUMNS else row.get(c)
+            for c in DETAIL_COLUMNS
+        )
+        for row in rows
+    ]
+    updatable = [c for c in DETAIL_COLUMNS if c != "content_id"]
     sql = (
-        "UPDATE place AS p SET overview = v.overview "
-        "FROM (VALUES %s) AS v(content_id, overview) "
-        "WHERE p.content_id = v.content_id"
+        "INSERT INTO place_detail ({cols}) VALUES %s "
+        "ON CONFLICT (content_id) DO UPDATE SET {updates}, updated_at = now()"
+    ).format(
+        cols=", ".join(DETAIL_COLUMNS),
+        updates=", ".join("{0} = EXCLUDED.{0}".format(c) for c in updatable),
     )
     with conn.cursor() as cur:
-        execute_values(cur, sql, pairs, page_size=chunk_size)
+        execute_values(cur, sql, values, page_size=chunk_size)
     conn.commit()
-    return len(pairs)
+    return len(values)
+
+
+def max_place_modified_time(conn: PgConnection) -> Optional[str]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT max(source_modified_time) FROM place")
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def start_job_run(conn: PgConnection, job: str) -> int:
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO batch_job_run (job) VALUES (%s) RETURNING id", (job,))
+        run_id = int(cur.fetchone()[0])
+    conn.commit()
+    return run_id
+
+
+def finish_job_run(
+    conn: PgConnection,
+    run_id: int,
+    status: str,
+    stats: Dict[str, Any],
+    error: Optional[str] = None,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE batch_job_run SET finished_at = now(), status = %s, stats = %s, error = %s "
+            "WHERE id = %s",
+            (status, json.dumps(stats, ensure_ascii=False, default=str), error, run_id),
+        )
+    conn.commit()
+
+
+def list_job_runs(conn: PgConnection, limit: int = 5) -> List[Tuple[Any, ...]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, job, started_at, finished_at, status, stats, error "
+            "FROM batch_job_run ORDER BY started_at DESC LIMIT %s",
+            (limit,),
+        )
+        return cur.fetchall()
 
 
 def get_last_page(conn: PgConnection, source: str) -> int:
@@ -197,6 +284,16 @@ def table_exists(conn: PgConnection, table: str) -> bool:
     with conn.cursor() as cur:
         cur.execute("SELECT to_regclass(%s) IS NOT NULL", (table,))
         return bool(cur.fetchone()[0])
+
+
+def column_exists(conn: PgConnection, table: str, column: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = %s AND column_name = %s",
+            (table, column),
+        )
+        return cur.fetchone() is not None
 
 
 def list_cursors(conn: PgConnection) -> List[Tuple[str, int, int]]:

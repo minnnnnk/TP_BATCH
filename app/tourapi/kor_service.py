@@ -38,6 +38,17 @@ class KorServiceApi:
             "areaBasedList2", base_params, num_of_rows, start_page, max_pages
         )
 
+    def fetch_recent_page(self, page_no: int, num_of_rows: int = 100) -> FetchResult:
+        """전국 전체를 수정일 최신순으로 정렬한 목록의 한 페이지 (증분 갱신용).
+
+        arrange=C는 modifiedtime 내림차순이라, 앞 페이지부터 읽다가 이미 가진
+        수정일시보다 오래된 항목이 나오면 거기서 멈추면 된다.
+        """
+        return self.client.fetch_page(
+            "areaBasedList2",
+            {"arrange": "C", "numOfRows": str(num_of_rows), "pageNo": str(page_no)},
+        )
+
     def fetch_detail_common(self, content_id: str) -> Optional[Dict[str, Any]]:
         """공통정보 조회 (detailCommon2).
 
@@ -47,6 +58,26 @@ class KorServiceApi:
         result = self.client.fetch_page(
             "detailCommon2",
             {"contentId": content_id, "numOfRows": "1", "pageNo": "1"},
+        )
+        items: List[Dict[str, Any]] = result.items
+        return items[0] if items else None
+
+    def fetch_detail_intro(
+        self, content_id: str, content_type_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """소개정보 조회 (detailIntro2).
+
+        운영시간·휴무일·주차·요금 등이 관광타입마다 다른 필드명으로 내려온다
+        (관광지 usetime, 음식점 opentimefood ...). 필드 정리는 detail_parser가 맡는다.
+        """
+        result = self.client.fetch_page(
+            "detailIntro2",
+            {
+                "contentId": content_id,
+                "contentTypeId": content_type_id,
+                "numOfRows": "1",
+                "pageNo": "1",
+            },
         )
         items: List[Dict[str, Any]] = result.items
         return items[0] if items else None

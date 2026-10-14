@@ -36,6 +36,7 @@ wheels/
 *.egg
 
 # Testing & Linting
+tests/
 .pytest_cache/
 .coverage
 htmlcov/
@@ -50,3 +51,4 @@ Thumbs.db
 
 # Project outputs
 output/
+logs/
